@@ -23,7 +23,7 @@ use regex::Regex;
 use serde::Deserialize;
 use std::format;
 use std::{collections::HashMap, fs::File, io::Read, path::PathBuf, sync::Mutex};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -480,7 +480,38 @@ async fn get_context(room: &Room) -> Result<(String, Option<String>, Vec<MediaFi
                 )
             {
                 match &content.msgtype {
+                    MessageType::Audio(audio_content) => {
+                        messages.push(format!("USER sent an audio file: {}\n", audio_content.body));
+                    }
+                    MessageType::Emote(emote_content) => {
+                        // USER sent an emote: sends hearts 💝
+                        messages.push(format!("USER sent an emote: {}\n", emote_content.body));
+                    }
+                    MessageType::File(file_content) => {
+                        messages.push(format!("USER sent a file: {}\n", file_content.body));
+                        let request = MediaRequest {
+                            source: file_content.source.clone(),
+                            format: MediaFormat::File,
+                        };
+                        let mime = file_content
+                            .info
+                            .as_ref()
+                            .unwrap()
+                            .mimetype
+                            .clone()
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        let x = room
+                            .client()
+                            .media()
+                            .get_media_file(&request, None, &mime, true, None)
+                            .await
+                            .unwrap();
+                        media.insert(0, x);
+                    }
                     MessageType::Image(image_content) => {
+                        messages.push(format!("USER sent an image: {}\n", image_content.body));
                         let request = MediaRequest {
                             source: image_content.source.clone(),
                             format: MediaFormat::File,
@@ -501,6 +532,20 @@ async fn get_context(room: &Room) -> Result<(String, Option<String>, Vec<MediaFi
                             .await
                             .unwrap();
                         media.insert(0, x);
+                    }
+                    MessageType::Location(location_content) => {
+                        messages.push(format!(
+                            "USER sent their location: {}\n",
+                            location_content.body
+                        ));
+                    }
+                    MessageType::Notice(notice_content) => {
+                        if sender != room.client().user_id().unwrap().as_str() {
+                            messages.push(format!("USER sent a notice: {}\n", notice_content.body));
+                        }
+                    }
+                    MessageType::ServerNotice(text_content) => {
+                        messages.push(format!("SERVER: {}\n", text_content.body));
                     }
                     MessageType::Text(text_content) => {
                         if is_command(&text_content.body) {
@@ -534,7 +579,21 @@ async fn get_context(room: &Room) -> Result<(String, Option<String>, Vec<MediaFi
                             }
                         }
                     }
-                    _ => {}
+                    // not useful information
+                    MessageType::VerificationRequest(_) => {}
+                    MessageType::Video(video_content) => {
+                        messages.push(format!("USER sent a video file: {}\n", video_content.body));
+                    }
+                    MessageType::_Custom(_) => {
+                        messages.push(format!(
+                            "USER sent a message of type {}: {}\n",
+                            content.msgtype(),
+                            content.body()
+                        ));
+                    }
+                    x => {
+                        warn!("Unhandled message type: {:#?}", x);
+                    }
                 };
             }
         }
