@@ -103,11 +103,6 @@ async fn main() -> anyhow::Result<()> {
     // even if they were invited before the bot was started.
     bot.join_rooms();
 
-    // Syncs to the current state
-    if let Err(e) = bot.sync().await {
-        info!("Error syncing: {e}");
-    }
-
     info!("The client is ready! Listening to new messages…");
 
     // The party command is from the matrix-rust-sdk examples
@@ -234,6 +229,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Ok(())
     });
+
+    // Syncs to the current state
+    if let Err(e) = bot.sync().await {
+        error!("Error syncing: {e}");
+    }
 
     // Run the bot, this should never return except on error
     if let Err(e) = bot.run().await {
