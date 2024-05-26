@@ -118,8 +118,7 @@ async fn main() -> anyhow::Result<()> {
         "print",
         "Print the conversation".to_string(),
         |_, _, room| async move {
-            let (context, _, _) = get_context(&room).await.unwrap();
-            let mut context = add_role(&context);
+            let (mut context, _, _) = get_context(&room).await.unwrap();
             context.insert_str(0, ".context:\n");
             let content = RoomMessageEventContent::notice_plain(context);
             room.send(content).await.unwrap();
