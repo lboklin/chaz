@@ -118,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
     // we don't expose it because one might want to avoid spoiling the role prompt
     // (full exposition can kind of ruin the magic of a quirky character)
     bot.register_text_command("fullcontext", None, |_, _, room| async move {
-        let (mut context, _, _) = get_context(&room).await.unwrap();
+        let (mut context, _, _, _) = get_context(&room).await.unwrap();
         context = add_role(&context);
         context.insert_str(0, ".fullcontext:\n");
         let content = RoomMessageEventContent::notice_plain(context);
@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
         "print",
         "Print the conversation".to_string(),
         |_, _, room| async move {
-            let (mut context, _, _) = get_context(&room).await.unwrap();
+            let (mut context, _, _, _) = get_context(&room).await.unwrap();
             context.insert_str(0, ".context:\n");
             let content = RoomMessageEventContent::notice_plain(context);
             room.send(content).await.unwrap();
@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
             let input = text.trim_start_matches(".send").trim();
 
             // But we do need to read the context to figure out the model to use
-            let (_, model, _) = get_context(&room).await.unwrap();
+            let (_, model, _, _) = get_context(&room).await.unwrap();
 
             info!(
                 "Request: {} - {}",
@@ -216,6 +216,34 @@ async fn main() -> anyhow::Result<()> {
     .await;
 
     bot.register_text_command(
+        "lurk",
+        "Do not respond (does not affect notices)".to_string(),
+        |_, _, room| async move {
+            room.send(RoomMessageEventContent::notice_plain(
+                ".lurk: Will not engage in conversation",
+            ))
+            .await
+            .unwrap();
+            Ok(())
+        },
+    )
+    .await;
+
+    bot.register_text_command(
+        "nolurk",
+        "Stop lurking".to_string(),
+        |_, _, room| async move {
+            room.send(RoomMessageEventContent::notice_plain(
+                ".lurk: Will respond normally",
+            ))
+            .await
+            .unwrap();
+            Ok(())
+        },
+    )
+    .await;
+
+    bot.register_text_command(
         "rename",
         "Rename the room and set the topic based on the chat content".to_string(),
         rename,
@@ -227,7 +255,11 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         // If it's not a command, we should send the full context without commands to the server
-        if let Ok((context, model, media)) = get_context(&room).await {
+        if let Some((context, model, _, media)) = get_context(&room)
+            .await
+            .ok()
+            .filter(|(_, _, lurk, _)| !lurk.unwrap_or(false))
+        {
             let mut context = add_role(&context);
             // Append "ASSISTANT: " to the context string to indicate the assistant is speaking
             context.push_str("ASSISTANT: ");
@@ -337,7 +369,7 @@ async fn rate_limit(room: &Room, sender: &OwnedUserId) -> bool {
 
 /// List the available models
 async fn list_models(_: OwnedUserId, _: String, room: Room) -> Result<(), ()> {
-    let (_, current_model, _) = get_context(&room).await.unwrap();
+    let (_, current_model, _, _) = get_context(&room).await.unwrap();
     let response = format!(
         ".models:\n\ncurrent: {}\n\nAvailable Models:\n{}",
         current_model.unwrap_or(get_backend().default_model()),
@@ -381,7 +413,7 @@ async fn rename(sender: OwnedUserId, _: String, room: Room) -> Result<(), ()> {
     if rate_limit(&room, &sender).await {
         return Ok(());
     }
-    if let Ok((context, _, _)) = get_context(&room).await {
+    if let Ok((context, _, _, _)) = get_context(&room).await {
         let title_prompt= [
                             &context,
                             "\nUSER: Summarize this conversation in less than 20 characters to use as the title of this conversation. ",
@@ -485,12 +517,15 @@ fn get_chat_summary_model() -> Option<String> {
 
 /// Gets the context of the current conversation
 /// Returns a model if it was ever entered
-async fn get_context(room: &Room) -> Result<(String, Option<String>, Vec<MediaFileHandle>), ()> {
+async fn get_context(
+    room: &Room,
+) -> Result<(String, Option<String>, Option<bool>, Vec<MediaFileHandle>), ()> {
     // Read all the messages in the room, place them into a single string, and print them out
     let mut messages = Vec::new();
 
     let mut options = MessagesOptions::backward();
     let mut model_response = None;
+    let mut lurk = None;
     let mut media = Vec::new();
 
     'outer: while let Ok(batch) = room.messages(options).await {
@@ -587,12 +622,15 @@ async fn get_context(room: &Room) -> Result<(String, Option<String>, Vec<MediaFi
                                         model_response = Some(model.to_string());
                                     }
                                 }
-                            }
-                            // if the message was a clear command, we are finished
-                            if text_content.body.starts_with(".clear") {
+                            } else if text_content.body.starts_with(".nolurk") {
+                                lurk = Some(false);
+                            } else if text_content.body.starts_with(".lurk") && lurk.is_none() {
+                                lurk = Some(true);
+                            } else if text_content.body.starts_with(".clear") {
+                                // if the message was a clear command, we are finished
                                 break 'outer;
                             }
-                        } else {
+                        } else if !lurk.unwrap_or(false) {
                             // Push the sender and message to the front of the string
                             if room
                                 .client()
@@ -635,6 +673,7 @@ async fn get_context(room: &Room) -> Result<(String, Option<String>, Vec<MediaFi
     Ok((
         messages.into_iter().rev().collect::<String>(),
         model_response,
+        lurk,
         media,
     ))
 }
