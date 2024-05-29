@@ -17,9 +17,12 @@ use matrix_sdk::{
         api::client::receipt::create_receipt::v3::ReceiptType,
         events::{
             receipt::ReceiptThread::Unthreaded,
-            room::message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
+            room::message::{
+                AddMentions, ForwardThread, MessageType, OriginalSyncRoomMessageEvent,
+                RoomMessageEventContent,
+            },
         },
-        OwnedEventId, OwnedUserId,
+        OwnedUserId,
     },
     Room, RoomMemberships, RoomState,
 };
@@ -255,48 +258,55 @@ async fn main() -> anyhow::Result<()> {
     .await;
 
     // FIXME: need access to event id, so we can't use `Bot::register_text_handler`
-    register_text_handler(&bot, |sender, _, event_id, room: Room| async move {
-        room.send_single_receipt(ReceiptType::Read, Unthreaded, event_id)
+    register_text_handler(&bot, |event, room: Room| async move {
+        let sender = event.sender.clone();
+        room.send_single_receipt(ReceiptType::Read, Unthreaded, event.event_id.to_owned())
             .await
             .unwrap();
         if rate_limit(&room, &sender).await {
-            return Ok(());
-        } else if let Some((context, model, _, media)) = get_context(&room)
-            .await
-            .ok()
-            .filter(|(_, _, lurk, _)| !lurk.unwrap_or(false))
-        {
-            // If it's not a command, we should send the full context without commands to the server
-            let mut context = add_role(&context);
-            // Append "ASSISTANT: " to the context string to indicate the assistant is speaking
-            context.push_str("ASSISTANT: ");
+            Ok("rate limited".to_string())
+        } else if sender == room.client().user_id().unwrap().as_str() {
+            Ok("not responding to myself".to_string())
+        } else if let Ok((context, model, lurk, media)) = get_context(&room).await {
+            if !lurk.unwrap_or(false) {
+                // If it's not a command, we should send the full context without commands to the server
+                let mut context = add_role(&context);
+                // Append "ASSISTANT: " to the context string to indicate the assistant is speaking
+                context.push_str("ASSISTANT: ");
 
-            info!(
-                "Request: {} - {}",
-                sender.as_str(),
-                context.replace('\n', " ")
-            );
-            match get_backend().execute(&model, context, media) {
-                Ok(stdout) => {
-                    info!("Response: {}", stdout.replace('\n', " "));
-                    room.send(RoomMessageEventContent::text_plain(stdout))
+                info!(
+                    "Request: {} - {}",
+                    sender.as_str(),
+                    context.replace('\n', " ")
+                );
+                match get_backend().execute(&model, context, media) {
+                    Ok(stdout) => {
+                        info!("Response: {}", stdout.replace('\n', " "));
+                        room.send(RoomMessageEventContent::text_plain(stdout).make_reply_to(
+                            &event.into_full_event(room.room_id().to_owned()),
+                            ForwardThread::No,
+                            AddMentions::No,
+                        ))
                         .await
                         .unwrap();
-                    Ok(())
+                        Ok("responded".to_string())
+                    }
+                    Err(stderr) => {
+                        error!("Error: {}", stderr.replace('\n', " "));
+                        room.send(RoomMessageEventContent::notice_plain(format!(
+                            ".error: {}",
+                            stderr.replace('\n', " ")
+                        )))
+                        .await
+                        .unwrap();
+                        Err("error: {stderr}".to_string())
+                    }
                 }
-                Err(stderr) => {
-                    error!("Error: {}", stderr.replace('\n', " "));
-                    room.send(RoomMessageEventContent::notice_plain(format!(
-                        ".error: {}",
-                        stderr.replace('\n', " ")
-                    )))
-                    .await
-                    .unwrap();
-                    Err(())
-                }
+            } else {
+                Ok("lurking".to_string())
             }
         } else {
-            Err(())
+            Err("could not get context".to_string())
         }
     });
 
@@ -317,8 +327,8 @@ async fn main() -> anyhow::Result<()> {
 // (unfortunately we can't enforce the allowlist - `is_allowed` is private)
 pub fn register_text_handler<F, Fut>(bot: &Bot, callback: F)
 where
-    F: FnOnce(OwnedUserId, String, OwnedEventId, Room) -> Fut + Send + 'static + Clone + Sync,
-    Fut: std::future::Future<Output = Result<(), ()>> + Send + 'static,
+    F: FnOnce(OriginalSyncRoomMessageEvent, Room) -> Fut + Send + 'static + Clone + Sync,
+    Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
 {
     let client = bot.client();
     client.add_event_handler(
@@ -327,17 +337,18 @@ where
             if room.state() != RoomState::Joined {
                 return;
             }
-            let MessageType::Text(text_content) = &event.content.msgtype else {
+            let MessageType::Text(text_content) = &event.content.msgtype.to_owned() else {
                 return;
             };
             let body = text_content.body.trim_start();
             if is_command(body) {
                 return;
             }
-            if let Err(e) =
-                callback(event.sender.clone(), body.to_string(), event.event_id, room).await
-            {
-                error!("Error responding to: {}\nError: {:?}", body, e);
+            match callback(event, room).await {
+                Err(e) => {
+                    error!("Error responding to: {}\nError: {:?}", body, e);
+                }
+                Ok(res) => info!(res),
             }
         },
     );
