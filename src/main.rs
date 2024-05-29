@@ -187,6 +187,21 @@ async fn main() -> anyhow::Result<()> {
     .await;
 
     bot.register_text_command(
+        "leave",
+        "Leave the room".to_string(),
+        |_, _, room| async move {
+            room.send(RoomMessageEventContent::notice_plain(
+                ".leave: Leaving the room",
+            ))
+            .await
+            .unwrap();
+            room.leave().await.unwrap();
+            Ok(())
+        },
+    )
+    .await;
+
+    bot.register_text_command(
         "rename",
         "Rename the room and set the topic based on the chat content".to_string(),
         rename,
