@@ -14,10 +14,14 @@ use matrix_sdk::{
     media::{MediaFileHandle, MediaFormat, MediaRequest},
     room::MessagesOptions,
     ruma::{
-        events::room::message::{MessageType, RoomMessageEventContent},
-        OwnedUserId,
+        api::client::receipt::create_receipt::v3::ReceiptType,
+        events::{
+            receipt::ReceiptThread::Unthreaded,
+            room::message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
+        },
+        OwnedEventId, OwnedUserId,
     },
-    Room, RoomMemberships,
+    Room, RoomMemberships, RoomState,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -250,16 +254,19 @@ async fn main() -> anyhow::Result<()> {
     )
     .await;
 
-    bot.register_text_handler(|sender, _, room| async move {
+    // FIXME: need access to event id, so we can't use `Bot::register_text_handler`
+    register_text_handler(&bot, |sender, _, event_id, room: Room| async move {
+        room.send_single_receipt(ReceiptType::Read, Unthreaded, event_id)
+            .await
+            .unwrap();
         if rate_limit(&room, &sender).await {
             return Ok(());
-        }
-        // If it's not a command, we should send the full context without commands to the server
-        if let Some((context, model, _, media)) = get_context(&room)
+        } else if let Some((context, model, _, media)) = get_context(&room)
             .await
             .ok()
             .filter(|(_, _, lurk, _)| !lurk.unwrap_or(false))
         {
+            // If it's not a command, we should send the full context without commands to the server
             let mut context = add_role(&context);
             // Append "ASSISTANT: " to the context string to indicate the assistant is speaking
             context.push_str("ASSISTANT: ");
@@ -275,6 +282,7 @@ async fn main() -> anyhow::Result<()> {
                     room.send(RoomMessageEventContent::text_plain(stdout))
                         .await
                         .unwrap();
+                    Ok(())
                 }
                 Err(stderr) => {
                     error!("Error: {}", stderr.replace('\n', " "));
@@ -284,10 +292,12 @@ async fn main() -> anyhow::Result<()> {
                     )))
                     .await
                     .unwrap();
+                    Err(())
                 }
             }
+        } else {
+            Err(())
         }
-        Ok(())
     });
 
     // Syncs to the current state
@@ -301,6 +311,36 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+// modified Bot::register_text_handler which gives access to event_id
+// (unfortunately we can't enforce the allowlist - `is_allowed` is private)
+pub fn register_text_handler<F, Fut>(bot: &Bot, callback: F)
+where
+    F: FnOnce(OwnedUserId, String, OwnedEventId, Room) -> Fut + Send + 'static + Clone + Sync,
+    Fut: std::future::Future<Output = Result<(), ()>> + Send + 'static,
+{
+    let client = bot.client();
+    client.add_event_handler(
+        move |event: OriginalSyncRoomMessageEvent, room: Room| async move {
+            // Ignore messages from rooms we're not in
+            if room.state() != RoomState::Joined {
+                return;
+            }
+            let MessageType::Text(text_content) = &event.content.msgtype else {
+                return;
+            };
+            let body = text_content.body.trim_start();
+            if is_command(body) {
+                return;
+            }
+            if let Err(e) =
+                callback(event.sender.clone(), body.to_string(), event.event_id, room).await
+            {
+                error!("Error responding to: {}\nError: {:?}", body, e);
+            }
+        },
+    );
 }
 
 /// Prepend the role defined in the global config
