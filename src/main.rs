@@ -114,6 +114,20 @@ async fn main() -> anyhow::Result<()> {
     })
     .await;
 
+    // print context with role and examples included
+    // we don't expose it because one might want to avoid spoiling the role prompt
+    // (full exposition can kind of ruin the magic of a quirky character)
+    bot.register_text_command("fullcontext", None, |_, _, room| async move {
+        let (mut context, _, _) = get_context(&room).await.unwrap();
+        context = add_role(&context);
+        context.insert_str(0, ".fullcontext:\n");
+        let content = RoomMessageEventContent::notice_plain(context);
+        room.send(content).await.unwrap();
+        Ok(())
+    })
+    .await;
+
+    // print context, exluding role and examples
     bot.register_text_command(
         "print",
         "Print the conversation".to_string(),
